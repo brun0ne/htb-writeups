@@ -1,0 +1,13 @@
+---
+---
+
+@import "{{ site.theme }}";
+
+body {
+    background: rgb(8, 8, 8);
+}
+
+header h2 {
+    text-shadow: none;
+    color: rgb(223, 208, 208) !important;
+}

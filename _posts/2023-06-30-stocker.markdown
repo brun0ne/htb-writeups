@@ -2,7 +2,9 @@
 layout: post
 title:  "Writeup of Stocker (HackTheBox)"
 date:   2023-06-30 16:28:53 +0000
-categories: htb, hackthebox
+categories: hackthebox
+author: brun0ne
+tags: htb hackthebox stocker nosql injection 
 ---
 
 # Discovery
