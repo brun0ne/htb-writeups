@@ -3,8 +3,15 @@
 <!-- Setup theme-color -->
 {% include head-custom-theme-colors.html %}
 
-<!-- Setup Google Analytics -->
-{% include head-custom-google-analytics.html %}
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-MD00QKWTZ3"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'G-MD00QKWTZ3');
+</script>
 
 <!-- You can set your favicon here -->
 <link rel="shortcut icon" type="image/x-icon" href="{{ '/assets/images/favicon.png' | relative_url }}" />
