@@ -21,7 +21,7 @@
 title: brun0ne
 # email: 
 description: >- # this means to ignore newlines until "baseurl:"
-  Writeups for retired HackTheBox machines and CTFs 👨🏻‍💻
+  Writeups for retired HackTheBox machines 👨🏻‍💻
 #baseurl: "/blog" # the subpath of your site, e.g. /blog
 url: "https://brun0ne.github.io/htb-writeups" # the base hostname & protocol for your site, e.g. http://example.com
 # twitter_username: jekyllrb
