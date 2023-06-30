@@ -7,4 +7,4 @@ layout: default
 
 # Posts
 
-## [30-06-2023] [HackTheBox: Stocker (Writeup)]({% post_url 2023-06-30-stocker %})
+## [30-06-2023] [HackTheBox: Stocker (Writeup)](/blog{% post_url 2023-06-30-stocker %})
