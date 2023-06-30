@@ -4,3 +4,5 @@
 
 layout: home
 ---
+
+Hi! I'm brun0ne - [here's my HackTheBox profile](https://app.hackthebox.com/profile/70197)! This site is meant mainly for notes from HTB Machines which I've finished, published after they get retired.
