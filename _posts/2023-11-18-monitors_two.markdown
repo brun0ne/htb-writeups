@@ -16,8 +16,6 @@ var cactiVersion='1.2.22';
 
 [Known vulnerability for 1.2.2](https://github.com/FredBrave/CVE-2022-46169-CACTI-1.2.22)
 
-`entrypoint.sh`
-
 # www-data enum
 
 We get a reverse shell as **www-data** in some docker container.
